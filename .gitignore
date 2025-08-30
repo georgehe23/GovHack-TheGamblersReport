@@ -1,0 +1,47 @@
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+.vite/
+.vite-deps/
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# Env files (keep example)
+.env
+.env.*
+!.env.example
+
+# Coverage / build outputs
+coverage/
+build/
+out/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Streamlit / app outputs
+georgehe23/visualiser/output/
+
+# Generated maps (avoid committing large HTML artifacts)
+georgehe23/map/map.html
+georgehe23/visualiser-web/public/map.html
+

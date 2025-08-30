@@ -9,4 +9,5 @@ dependencies = []
 [tool.uv.workspace]
 members = [
     "georgehe23",
+    "georgehe23/visualiser",
 ]
