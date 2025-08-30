@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "web": "vite",
+    "api": "uv run uvicorn orthogenie.mapper.vic_lga_map_api:app --reload --host 0.0.0.0 --port 8000",
+    "dev": "concurrently -k \"npm:web\" \"npm:api\"",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -25,7 +27,8 @@
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.10",
     "typescript": "^5.3.3",
-    "vite": "^5.4.0"
+    "vite": "^5.4.0",
+    "concurrently": "^9.0.1"
   }
 }
 

@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """
-Interactive LGA map visualiser for a Shapefile using Folium.
+Master LGA map creator with interactive features (Folium).
 
-Usage:
+Features:
+- Accepts a GeoJSON or Shapefile input; auto-reprojects Shapefiles to WGS84.
+- Tooltips with common LGA name fields; highlight on hover.
+- Plugins: Fullscreen, Mouse position, Scale bar, Search by LGA name.
+- Optional choropleth overlays using numeric fields in the GeoJSON properties.
+
+Usage (examples):
+  # Using GeoJSON (recommended)
+  python visualize_lga.py --shapefile ../../data/vic_lga_boundaries.geojson --out map.html \
+    --overlay-fields "Expenditure per EGM,Unemployment Rate,EGMs per 1000 Adults"
+
+  # Using a Shapefile (requires sidecar files: .dbf, .shx, .prj)
   python visualize_lga.py --shapefile ../../AD_LGA_AREA_POLYGON.shp --out map.html
 
 Notes:
   - Folium renders in WGS84 (EPSG:4326). The script reprojects if needed.
-  - Shapefiles require companion files (.shx, .dbf, .prj). Place them next
-    to the .shp file. If missing, attribute tooltips may not work or the
-    read may fail. If reading fails, the script prints a helpful message.
-  - You can also pass any vector file supported by GeoPandas (e.g. GeoJSON).
+  - For Shapefiles, ensure companion files (.shx, .dbf, .prj) are present.
+  - To color polygons by metrics, pass --overlay-fields with property names that exist in the GeoJSON features.
 """
 
 from __future__ import annotations
@@ -27,13 +36,13 @@ def _fail(msg: str, code: int = 1) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Interactive map visualiser for LGA polygons")
+    p = argparse.ArgumentParser(description="Master LGA map creator for LGA polygons")
     p.add_argument(
         "--shapefile",
         "-s",
         type=str,
-        default="../../AD_LGA_AREA_POLYGON.shp",
-        help="Path to shapefile (or any GeoPandas-readable vector file)",
+        default="../../data/vic_lga_boundaries.geojson",
+        help="Path to GeoJSON or Shapefile (GeoPandas-readable)",
     )
     p.add_argument(
         "--out",
@@ -54,96 +63,122 @@ def parse_args() -> argparse.Namespace:
         default="CartoDB positron",
         help="Base tiles name or URL template for Folium",
     )
+    p.add_argument(
+        "--overlay-fields",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated property names to choropleth. "
+            "These must exist in the GeoJSON feature properties."
+        ),
+    )
+    p.add_argument(
+        "--metrics-file",
+        type=str,
+        default=None,
+        help="Optional CSV/XLSX with LGA metrics to overlay (FastAPI-style aggregation)",
+    )
     return p.parse_args()
 
 
-def main() -> None:
+def build_map(
+    shapefile: str | Path,
+    out: str | Path,
+    name_field: str | None = None,
+    tiles: str = "CartoDB positron",
+    overlay_fields_arg: list[str] | None = None,
+    metrics_file: str | Path | None = None,
+) -> Path:
+    """Builds the interactive LGA map and writes it to `out`.
+
+    Returns the output path.
+    """
     try:
-        import geopandas as gpd
-        import folium
-        from folium import plugins
+        import folium  # type: ignore
+        from folium import plugins  # type: ignore
     except ImportError as e:
-        _fail(
-            "Missing dependencies. Please install requirements first, e.g.\n"
-            "  pip install -r requirements.txt\n\n"
-            f"Details: {e}"
-        )
+        _fail("Missing folium. Install with: pip install folium\n\n" + f"Details: {e}")
 
-    args = parse_args()
-    shp_path = Path(args.shapefile)
-    out_path = Path(args.out)
-
+    shp_path = Path(shapefile)
+    out_path = Path(out)
     if not shp_path.exists():
         _fail(f"Input not found: {shp_path}")
 
-    try:
-        gdf = gpd.read_file(shp_path)
-    except Exception as e:
-        # Common cause: missing .dbf/.shx alongside .shp
-        msg = (
-            f"Failed to read vector file: {shp_path}\n"
-            f"Reason: {e}\n\n"
-            "If using a Shapefile, ensure the companion files (.shx, .dbf, .prj)\n"
-            "are present next to the .shp. Alternatively, try a GeoJSON file."
-        )
-        _fail(msg)
+    is_geojson = shp_path.suffix.lower() in {".geojson", ".json"}
 
-    if gdf.empty:
-        _fail("The dataset is empty. Nothing to display.")
+    # Load geometry either via GeoJSON or GeoPandas for Shapefiles
+    if is_geojson:
+        try:
+            with open(shp_path, "r", encoding="utf-8") as f:
+                geojson = json.load(f)
+        except Exception as e:
+            _fail(f"Failed to read GeoJSON: {e}")
+    else:
+        try:
+            import geopandas as gpd  # type: ignore
+        except ImportError as e:
+            _fail("Reading Shapefiles requires GeoPandas. Install with: pip install geopandas\n\n" + f"Details: {e}")
+        try:
+            gdf = gpd.read_file(shp_path)
+        except Exception as e:
+            _fail(f"Failed to read vector file: {shp_path}\nReason: {e}\nEnsure .shx/.dbf/.prj exist or use GeoJSON.")
+        if gdf.empty:
+            _fail("The dataset is empty. Nothing to display.")
+        try:
+            gdf_4326 = gdf if gdf.crs is None else gdf.to_crs(epsg=4326)
+        except Exception as e:
+            _fail(f"Failed to project data to EPSG:4326: {e}")
+        geojson = json.loads(gdf_4326.to_json())
 
-    # Reproject to WGS84 for Folium if needed
-    try:
-        if gdf.crs is None:
-            print("Warning: CRS is undefined; assuming data is already in EPSG:4326.")
-            gdf_4326 = gdf
-        else:
-            gdf_4326 = gdf.to_crs(epsg=4326)
-    except Exception as e:
-        _fail(f"Failed to project data to EPSG:4326: {e}")
+    # Determine center from bounds
+    def _walk_coords(obj, acc):
+        if isinstance(obj, list):
+            if len(obj) == 2 and all(isinstance(x, (int, float)) for x in obj):
+                x, y = obj
+                acc[0] = min(acc[0], x)
+                acc[1] = min(acc[1], y)
+                acc[2] = max(acc[2], x)
+                acc[3] = max(acc[3], y)
+            else:
+                for it in obj:
+                    _walk_coords(it, acc)
 
-    # Compute a map center using the dataset bounds
-    minx, miny, maxx, maxy = gdf_4326.total_bounds
+    bounds = [float("inf"), float("inf"), float("-inf"), float("-inf")]
+    for feat in geojson.get("features", []):
+        geom = feat.get("geometry")
+        if not geom:
+            continue
+        _walk_coords(geom.get("coordinates"), bounds)
+    if any(v in (float("inf"), float("-inf")) for v in bounds):
+        _fail("Could not determine bounds from geometry.")
+    minx, miny, maxx, maxy = bounds
     center_lat = (miny + maxy) / 2.0
     center_lon = (minx + maxx) / 2.0
 
-    # Choose some useful fields for tooltip
-    object_cols = [c for c in gdf_4326.columns if gdf_4326[c].dtype == "object"]
-
+    # Choose tooltip fields
     preferred_names = [
         "LGA_NAME", "LGA_NAME_2016", "LGA_NAME_2018", "LGA_NAME_2021",
         "LGA", "NAME", "NAME_2016", "NAME_2021", "STATE", "STATE_NAME",
         "REGION", "REGION_NAME",
     ]
-
+    first_props = next((f.get("properties", {}) for f in geojson.get("features", []) if f.get("properties")), {})
     fields = []
-    if args.name_field and args.name_field in gdf_4326.columns:
-        fields.append(args.name_field)
+    if name_field and name_field in first_props:
+        fields.append(name_field)
     else:
-        fields.extend([c for c in preferred_names if c in gdf_4326.columns])
-
-    # Fill with additional object columns up to a reasonable count
-    for c in object_cols:
-        if c not in fields and len(fields) < 5:  # cap to keep tooltip tidy
-            fields.append(c)
-
-    # Ensure at least one field exists for tooltip; if not, skip tooltip
+        fields.extend([c for c in preferred_names if c in first_props])
+    for k, v in first_props.items():
+        if isinstance(v, (str, int, float)) and k not in fields and len(fields) < 5:
+            fields.append(k)
     use_tooltip = len(fields) > 0
 
-    # Build the map
-    fmap = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles=args.tiles)
-
-    # Add nice plugins
+    # Build the map with plugins
+    fmap = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles=tiles)
     try:
         plugins.Fullscreen(position="topleft").add_to(fmap)
-        plugins.MousePosition(
-            position="bottomleft",
-            separator=" , ",
-            num_digits=6,
-            prefix="Lat, Lon:"
-        ).add_to(fmap)
+        plugins.MousePosition(position="bottomleft", separator=" , ", num_digits=6, prefix="Lat, Lon:").add_to(fmap)
         plugins.ScaleBar(position="bottomright").add_to(fmap)
     except Exception:
-        # Plugins are optional; continue if any issue
         pass
 
     style = lambda feature: {
@@ -159,14 +194,7 @@ def main() -> None:
         "fillOpacity": 0.7,
     }
 
-    tooltip = None
-    if use_tooltip:
-        tooltip = folium.GeoJsonTooltip(fields=fields, aliases=fields, sticky=True)
-
-    # Convert to GeoJSON string to avoid engine-dependent file pointers
-    geojson_str = gdf_4326.to_json()
-    geojson = json.loads(geojson_str)
-
+    tooltip = folium.GeoJsonTooltip(fields=fields, aliases=fields, sticky=True) if use_tooltip else None
     gj = folium.GeoJson(
         data=geojson,
         name="LGA Areas",
@@ -180,33 +208,148 @@ def main() -> None:
     )
     gj.add_to(fmap)
 
-    # Optional: add a simple search by name if we have a likely field
+    # Optional search by name
     try:
-        name_field = None
+        search_field = None
         for c in fields:
             if c.lower().startswith("lga") or c.lower() in ("name", "lga", "lganame"):
-                name_field = c
+                search_field = c
                 break
-        if name_field:
-            plugins.Search(
-                layer=gj,
-                geom_type="Polygon",
-                search_label=name_field,
-                placeholder="Search LGA",
-                collapsed=False,
-            ).add_to(fmap)
+        if search_field:
+            plugins.Search(layer=gj, geom_type="Polygon", search_label=search_field, placeholder="Search LGA", collapsed=False).add_to(fmap)
     except Exception:
         pass
 
+    # --- Choropleth overlays ---
+    # Option A: If a metrics_file is provided, aggregate like the FastAPI endpoint and key on the map's name field
+    def _clean_lga_name(name: str) -> str:
+        n = str(name).upper()
+        for token in ['CITY OF ', 'SHIRE OF ', 'RURAL CITY OF ', 'BOROUGH OF ', ' (CITY)', ' (SHIRE)', ' (RURAL CITY)', ' (BOROUGH)']:
+            n = n.replace(token, '')
+        return ' '.join(n.split()).strip()
+
+    metrics_df = None
+    if metrics_file is not None:
+        import pandas as pd  # type: ignore
+        mf_path = Path(metrics_file)
+        if mf_path.exists():
+            if mf_path.suffix.lower() == '.csv':
+                dfm = pd.read_csv(mf_path)
+            else:
+                dfm = pd.read_excel(mf_path)
+            lga_2023_24_columns = [
+                'LGA Name', 'LGA', 'Region', 'TOTAL Net Expenditure ($)',
+                'SEIFA DIS Score', 'SEIFADIS Rank State', 'SEIFA DIS RANK COUNTRY',
+                'SEIFA DIS RANK METRO', 'SEIFA ADVDIS Score', 'SEIFA ADVDIS Rank State',
+                'SEIFA ADVDIS RANK COUNTRY', 'SEIFA ADVDIS RANK METRO',
+                'Adult Population 2022', 'Adults per Venue 2022',
+                'EGMs per 1,000 Adults 2022', 'EXP per Adult 2022',
+                'Unemployed Workforce as at June 2022', 'as at June 2022',
+                'Unemployment rate as at June 2022'
+            ]
+            if len(dfm.columns) == len(lga_2023_24_columns):
+                dfm.columns = lga_2023_24_columns
+            lga_col = 'LGA Name' if 'LGA Name' in dfm.columns else dfm.columns[0]
+            exp_col = 'TOTAL Net Expenditure ($)' if 'TOTAL Net Expenditure ($)' in dfm.columns else None
+            egm_col = 'EGMs per 1,000 Adults 2022' if 'EGMs per 1,000 Adults 2022' in dfm.columns else None
+            unemp_col = 'Unemployment rate as at June 2022' if 'Unemployment rate as at June 2022' in dfm.columns else None
+            adults_col = 'Adult Population 2022' if 'Adult Population 2022' in dfm.columns else None
+            for c in [exp_col, egm_col, unemp_col, adults_col]:
+                if c and c in dfm.columns:
+                    dfm[c] = pd.to_numeric(dfm[c], errors='coerce')
+            if adults_col and adults_col in dfm.columns:
+                dfm = dfm[(dfm[adults_col].notnull()) & (dfm[adults_col] > 0)]
+            dfm['LGA_NAME_CLEAN'] = dfm[lga_col].apply(_clean_lga_name)
+            agg = {}
+            if exp_col: agg[exp_col] = 'sum'
+            if egm_col: agg[egm_col] = 'mean'
+            if unemp_col: agg[unemp_col] = 'mean'
+            if adults_col: agg[adults_col] = 'sum'
+            metrics_df = dfm.groupby('LGA_NAME_CLEAN').agg(agg)
+            if exp_col and egm_col and adults_col:
+                metrics_df['Expenditure per EGM'] = metrics_df[exp_col] / (metrics_df[adults_col] * metrics_df[egm_col] / 1000)
+            if unemp_col:
+                metrics_df['Unemployment Rate'] = metrics_df[unemp_col]
+            if egm_col:
+                metrics_df['EGMs per 1000 Adults'] = metrics_df[egm_col]
+            metrics_df = metrics_df.reset_index()
+
+    overlay_fields = overlay_fields_arg if overlay_fields_arg is not None else [
+        "Expenditure per EGM",
+        "Unemployment Rate",
+        "EGMs per 1000 Adults",
+    ]
+    label_field = search_field or (name_field if name_field else (fields[0] if fields else None))
+
+    if label_field:
+        try:
+            import pandas as pd  # type: ignore
+            if metrics_df is not None:
+                # Use aggregated metrics keyed by cleaned LGA name
+                for of in overlay_fields:
+                    if of in metrics_df.columns:
+                        folium.Choropleth(
+                            geo_data=geojson,
+                            name=of,
+                            data=metrics_df,
+                            columns=['LGA_NAME_CLEAN', of],
+                            key_on=f'feature.properties.{label_field}',
+                            fill_color='YlOrRd',
+                            fill_opacity=0.7,
+                            line_opacity=0.2,
+                            legend_name=of,
+                            nan_fill_color='white',
+                            highlight=True,
+                        ).add_to(fmap)
+            else:
+                # Fall back to using existing numeric properties in GeoJSON
+                rows = []
+                for f in geojson.get("features", []):
+                    props = f.get("properties", {})
+                    if label_field in props:
+                        row = {"__name": props.get(label_field)}
+                        for of in overlay_fields:
+                            val = props.get(of)
+                            if isinstance(val, (int, float)):
+                                row[of] = val
+                        rows.append(row)
+                if rows:
+                    df_props = pd.DataFrame(rows)
+                    for of in overlay_fields:
+                        if of in df_props.columns:
+                            folium.Choropleth(
+                                geo_data=geojson,
+                                name=of,
+                                data=df_props,
+                                columns=["__name", of],
+                                key_on=f"feature.properties.{label_field}",
+                                fill_color='YlOrRd',
+                                fill_opacity=0.7,
+                                line_opacity=0.2,
+                                legend_name=of,
+                                nan_fill_color='white',
+                                highlight=True,
+                            ).add_to(fmap)
+        except Exception:
+            pass
+
     folium.LayerControl(collapsed=False).add_to(fmap)
+    fmap.save(str(out_path))
+    return out_path
 
-    # Save output
-    try:
-        fmap.save(str(out_path))
-    except Exception as e:
-        _fail(f"Failed to save map HTML to {out_path}: {e}")
 
-    print(f"Saved interactive map to: {out_path}")
+def main() -> None:
+    args = parse_args()
+    overlay_list = [f.strip() for f in args.overlay_fields.split(',')] if args.overlay_fields else None
+    build_map(
+        shapefile=args.shapefile,
+        out=args.out,
+        name_field=args.name_field,
+        tiles=args.tiles,
+        overlay_fields_arg=overlay_list,
+        metrics_file=args.metrics_file,
+    )
+    print(f"Saved interactive map to: {args.out}")
 
 
 if __name__ == "__main__":
