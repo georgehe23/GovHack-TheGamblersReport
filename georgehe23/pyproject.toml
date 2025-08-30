@@ -1,0 +1,10 @@
+[project]
+name = "georgehe23"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "folium>=0.15",
+    "geopandas>=0.14",
+]
