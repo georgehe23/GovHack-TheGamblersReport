@@ -12,14 +12,17 @@ data_path = "datasets/yearly_density_statistical_release_nov_24_csv/Detail_Data_
 df = pd.read_csv(data_path)
 
 
-# Fix column names based on actual CSV header
-df.columns = [
-    'Name', 'Region', 'LGA Name', 'Venue type',
-    'Expenditure 1 Jul 24 - 31 Dec 24',
-    'Expenditure 1 Jan 25 - 30 Jun 25',
-    'Expenditure 01 Jul 24 - 30 Jun 25',
-    'Average EGM Numbers in June 2025'
+lga_2023_24_columns = [
+    'LGA Name', 'LGA', 'Region', 'TOTAL Net Expenditure ($)',
+    'SEIFA DIS Score', 'SEIFADIS Rank State', 'SEIFA DIS RANK COUNTRY',
+    'SEIFA DIS RANK METRO', 'SEIFA ADVDIS Score', 'SEIFA ADVDIS Rank State',
+    'SEIFA ADVDIS RANK COUNTRY', 'SEIFA ADVDIS RANK METRO',
+    'Adult Population 2022', 'Adults per Venue 2022',
+    'EGMs per 1,000 Adults 2022', 'EXP per Adult 2022',
+    'Unemployed Workforce as at June 2022', 'as at June 2022',
+    'Unemployment rate as at June 2022'
 ]
+df.columns = lga_2023_24_columns
 lga_col = 'LGA Name'
 exp_col = 'Expenditure 01 Jul 24 - 30 Jun 25'
 egm_col = 'Average EGM Numbers in June 2025'
